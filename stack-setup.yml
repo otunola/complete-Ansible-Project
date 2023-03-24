@@ -1,0 +1,399 @@
+---
+- name: Create VPC, Subnets, and NAT Gateway
+  hosts: localhost
+  gather_facts: false
+  vars:
+    region: "us-east-1"
+    vpc_cidr: "10.0.0.0/16"
+    public_subnet_cidr_1: "10.0.1.0/24"
+    private_subnet_cidr_1: "10.0.2.0/24"
+    private_subnet_cidr_2: "10.0.3.0/24"
+    key_name: "my-keypair"
+    ami_id: "ami-0123456789abcdef"
+    instance_type: "t2.micro"
+    desired_capacity: 1
+    max_size: 1
+    min_size: 1
+    public_alb_name: "public-alb"
+    private_alb_name: "private-alb"
+    proxy_server_name: "proxy-server"
+    tomcat_server_name: "tomcat-server"
+    public_rds_name: "public-rds"
+    private_rds_name: "private-rds"
+    bastion_host_name: "bastion-host"
+    public_nat_name: "public-nat"
+    private_nat_name: "private-nat"
+    alb_sg_name: "alb-sg"
+    web_sg_name: "web-sg"
+    db_sg_name: "db-sg"
+    bastion_sg_name: "bastion-sg"
+    nat_sg_name: "nat-sg"
+    az1: "{{ region }}a"
+    az2: "{{ region }}b"
+
+  tasks:
+    - name: Create VPC
+      ec2_vpc_net:
+        state: "present"
+        cidr_block: "{{ vpc_cidr }}"
+        region: "{{ region }}"
+        resource_tags:
+          Name: "my-vpc"
+      register: vpc
+
+    - name: Create Public Subnet 1
+      ec2_vpc_subnet:
+        state: "present"
+        cidr: "{{ public_subnet_cidr_1 }}"
+        vpc_id: "{{ vpc.id }}"
+        az: "{{ az1 }}"
+        resource_tags:
+          Name: "public-subnet-1"
+      register: subnet1
+
+    - name: Create Public Subnet 2
+      ec2_vpc_subnet:
+        state: "present"
+        cidr: "{{ public_subnet_cidr_1 }}"
+        vpc_id: "{{ vpc.id }}"
+        az: "{{ az2 }}"
+        resource_tags:
+          Name: "public-subnet-2"
+      register: subnet2
+
+    - name: Create Private Subnet 1
+      ec2_vpc_subnet:
+        state: "present"
+        cidr: "{{ private_subnet_cidr_1 }}"
+        vpc_id: "{{ vpc.id }}"
+        az: "{{ az1 }}"
+        resource_tags:
+          Name: "private-subnet-1"
+      register: subnet3
+
+    - name: Create Private Subnet 2
+      ec2_vpc_subnet:
+        state: "present"
+        cidr: "{{ private_subnet_cidr_1 }}"
+        vpc_id: "{{ vpc.id }}"
+        az: "{{ az2 }}"
+        resource_tags:
+          Name: "private-subnet-2"
+      register: subnet4
+
+    - name: Create Internet Gateway
+      ec2_vpc_igw:
+        state: "present"
+        vpc_id: "{{ vpc.id }}"
+        resource_tags:
+          Name: "my-igw"
+      register: igw
+
+    -
+- name: Create Route Table for Public Subnets
+  ec2_vpc_route_table:
+    state: "present"
+    vpc_id: "{{ vpc.id }}"
+    routes:
+      - dest: "0.0.0.0/0"
+        gateway_id: "{{ igw.gateway_id }}"
+    subnet_ids:
+      - "{{ subnet1.id }}"
+      - "{{ subnet2.id }}"
+    resource_tags:
+      Name: "public-rt"
+  register: rt1
+
+- name: Create Route Table for Private Subnets
+  ec2_vpc_route_table:
+    state: "present"
+    vpc_id: "{{ vpc.id }}"
+    routes:
+      - dest: "0.0.0.0/0"
+        nat_gateway_id: "{{ nat_gateway.id }}"
+    subnet_ids:
+      - "{{ subnet3.id }}"
+      - "{{ subnet4.id }}"
+    resource_tags:
+      Name: "private-rt"
+  register: rt2
+
+- name: Create Security Group for ALB
+  ec2_group:
+    state: "present"
+    vpc_id: "{{ vpc.id }}"
+    name: "{{ alb_sg_name }}"
+    description: "Security Group for Application Load Balancer"
+    rules:
+      - proto: tcp
+        from_port: 80
+        to_port: 80
+        cidr_ip: "0.0.0.0/0"
+      - proto: tcp
+        from_port: 443
+        to_port: 443
+        cidr_ip: "0.0.0.0/0"
+    resource_tags:
+      Name: "{{ alb_sg_name }}"
+  register: alb_sg
+
+- name: Create Security Group for Web Servers
+  ec2_group:
+    state: "present"
+    vpc_id: "{{ vpc.id }}"
+    name: "{{ web_sg_name }}"
+    description: "Security Group for Web Servers"
+    rules:
+      - proto: tcp
+        from_port: 80
+        to_port: 80
+        src_security_group: "{{ alb_sg.group_id }}"
+      - proto: tcp
+        from_port: 22
+        to_port: 22
+        src_security_group: "{{ bastion_sg.group_id }}"
+    resource_tags:
+      Name: "{{ web_sg_name }}"
+  register: web_sg
+
+- name: Create Security Group for Database
+  ec2_group:
+    state: "present"
+    vpc_id: "{{ vpc.id }}"
+    name: "{{ db_sg_name }}"
+    description: "Security Group for MySQL RDS"
+    rules:
+      - proto: tcp
+        from_port: 3306
+        to_port: 3306
+        src_security_group: "{{ web_sg.group_id }}"
+    resource_tags:
+      Name: "{{ db_sg_name }}"
+  register: db_sg
+
+- name: Create Security Group for Bastion Host
+  ec2_group:
+    state: "present"
+    vpc_id: "{{ vpc.id }}"
+    name: "{{ bastion_sg_name }}"
+    description: "Security Group for Bastion Host"
+    rules:
+      - proto: tcp
+        from_port: 22
+        to_port: 22
+        cidr_ip: "0.0.0.0/0"
+    resource_tags:
+      Name: "{{ bastion_sg_name }}"
+  register: bastion_sg
+
+- name: Create Security Group for NAT Gateway
+  ec2_group:
+    state: "present"
+    vpc_id: "{{ vpc.id }}"
+    name: "{{ nat_sg_name }}"
+    description: "Security Group for NAT Gateway"
+    rules:
+      - proto: tcp
+        from_port: 80
+        to_port: 80
+        src_security_group: "{{ web_sg.group_id }}"
+      - proto: tcp
+        from_port: 443
+        to_port: 443
+        src_security_group: "{{ web_sg.group_id }}"
+    resource_tags:
+      Name: "{{ nat_sg_name }}"
+  register: nat_sg
+
+- name: Create NAT Gateway
+  ec2_vpc_nat_gateway:
+    state: "present"
+    subnet_id: "{{ subnet1.id }}"
+    allocation_id: "{{ public_nat.allocation_id }}"
+    tags:
+      Name: "{{ public_nat_name }}"
+  register: nat_gateway
+
+- name: Create Public RDS Instance
+  ec2_rds:
+    state: "present"
+    region: "{{ region }}"
+    name: "{{ public_rds_name }}"
+    instance_class: "db.t2.micro"
+    engine: "mysql"
+    engine_version: "5.7.30"
+    license_model: "general-public-license"
+    storage_type: "gp2"
+    allocated_storage: 20
+    publicly_accessible: true
+    db_subnet_group_name: "{{ public_rds_name }}-subnet-group"
+    vpc_security_groups:
+      - "{{ db_sg.group_id }}"
+    db_parameter_group_name: "default.mysql5.7"
+    tags:
+      Name: "{{ public_rds_name }}"
+  register: public_rds
+
+- name: Create Private RDS Instance
+  ec2_rds:
+    state: "present"
+    region: "{{ region }}"
+    name: "{{ private_rds_name }}"
+    instance_class: "db.t2.micro"
+    engine: "mysql"
+    engine_version: "5.7.30"
+    license_model: "general-public-license"
+    storage_type: "gp2"
+    allocated_storage: 20
+    db_subnet_group_name: "{{ private_rds_name }}-subnet-group"
+    vpc_security_groups:
+      - "{{ db_sg.group_id }}"
+    db_parameter_group_name: "default.mysql5.7"
+    tags:
+      Name: "{{ private_rds_name }}"
+  register: private_rds
+
+- name: Create Autoscaling Group for Proxy Server
+  ec2_asg:
+    state: "present"
+    region: "{{ region }}"
+    name: "{{ proxy_server_name }}"
+    launch_config_name: "{{ proxy_server_name }}-lc"
+    image_id: "{{ ami_id }}"
+    instance_type: "{{ instance_type }}"
+    key_name: "{{ key_name }}"
+    vpc_zone_identifier: "{{ subnet1.id }},{{ subnet2.id }}"
+    desired_capacity: "{{ desired_capacity }}"
+    max_size: "{{ max_size }}"
+    min_size: "{{ min_size }}"
+    health_check_type: "ELB"
+    load_balancers:
+      - "{{ public_alb_name }}"
+    tags:
+      Name: "{{ proxy_server_name }}"
+
+- name: Create Autoscaling Launch Configuration for Proxy Server
+  ec2_lc:
+    state: "present"
+    name: "{{ proxy_server_name }}-lc"
+    image_id: "{{ ami_id }}"
+    instance_type: "{{ instance_type }}"
+    key_name: "{{ key_name }}"
+    security_groups:
+      - "{{ web_sg.group_id }}"
+    block_device_mappings:
+      - device_name: "/dev/sda1"
+        volume_size: 8
+        volume_type: "gp2"
+
+- name: Create Application Load Balancer for Public Subnets
+  ec2_elb_application_lb:
+    state: "present"
+    name: "{{ public_alb_name }}"
+    subnets:
+      - "{{ subnet1.id }}"
+      - "{{ subnet2.id }}"
+    security_groups:
+      - "{{ alb_sg.group_id }}"
+    tags:
+      Name: "{{ public_alb_name }}"
+
+- name: Create Application Load Balancer for Private Subnets
+  ec2_elb_application_lb:
+    state: "present"
+    name: "{{ private_alb_name }}"
+    subnets:
+      - "{{ subnet3.id }}"
+      - "{{ subnet4.id }}"
+    security_groups:
+      - "{{ alb_sg.group_id }}"
+    tags:
+    Name: "{{ private_alb_name }}"
+
+- name: Create Autoscaling Group for Tomcat Server
+  ec2_asg:
+    state: "present"
+    region: "{{ region }}"
+    name: "{{ tomcat_server_name }}"
+    launch_config_name: "{{ tomcat_server_name }}-lc"
+    image_id: "{{ ami_id }}"
+    instance_type: "{{ instance_type }}"
+    key_name: "{{ key_name }}"
+    vpc_zone_identifier: "{{ subnet3.id }},{{ subnet4.id }}"
+    desired_capacity: "{{ desired_capacity }}"
+    max_size: "{{ max_size }}"
+    min_size: "{{ min_size }}"
+    health_check_type: "ELB"
+    load_balancers:
+      - "{{ private_alb_name }}"
+    tags:
+      Name: "{{ tomcat_server_name }}"
+
+- name: Create Autoscaling Launch Configuration for Tomcat Server
+  ec2_lc:
+    state: "present"
+    name: "{{ tomcat_server_name }}-lc"
+    image_id: "{{ ami_id }}"
+    instance_type: "{{ instance_type }}"
+    key_name: "{{ key_name }}"
+    security_groups:
+      - "{{ web_sg.group_id }}"
+    block_device_mappings:
+      - device_name: "/dev/sda1"
+        volume_size: 8
+        volume_type: "gp2"
+
+- name: Create Bastion Host
+  ec2:
+    state: "present"
+    region: "{{ region }}"
+    key_name: "{{ key_name }}"
+    instance_type: "{{ instance_type }}"
+    image: "{{ ami_id }}"
+    vpc_subnet_id: "{{ subnet1.id }}"
+    assign_public_ip: true
+    group: "{{ bastion_sg.group_id }}"
+    count: 1
+    wait: true
+    instance_tags:
+      Name: "{{ bastion_host_name }}"
+  register: bastion_host
+
+- name: Wait for Bastion Host to be Running
+  wait_for:
+    host: "{{ bastion_host.instances[0].public_ip }}"
+    port: 22
+    state: "started"
+    delay: 5
+    timeout: 600
+
+- name: Save Key Pair on Control Machine
+  copy:
+    content: "{{ key.private_key }}"
+    dest: "/home/user/.ssh/{{ key_name }}.pem"
+    mode: 0600
+
+- name: Output Variables
+  debug:
+    var:
+      - vpc
+      - subnet1
+      - subnet2
+      - subnet3
+      - subnet4
+      - igw
+      - rt1
+      - rt2
+      - alb_sg
+      - web_sg
+      - db_sg
+      - bastion_sg
+      - nat_sg
+      - nat_gateway
+      - public_rds
+      - private_rds
+      - proxy_server_name
+      - tomcat_server_name
+      - public_alb_name
+      - private_alb_name
+      - bastion_host
